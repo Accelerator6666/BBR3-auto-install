@@ -1,0 +1,20 @@
+name: BBR3 installer checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bash syntax and static safety assertions
+        run: bash tests/static-test.sh
+      - name: ShellCheck (if available)
+        run: |
+          if command -v shellcheck >/dev/null 2>&1; then
+            shellcheck -S warning install.sh tests/static-test.sh
+          else
+            echo 'ShellCheck unavailable on runner; only syntax assertions ran'
+          fi
