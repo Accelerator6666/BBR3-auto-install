@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# BBR3-auto-install v0.2.0 — automatic OS/version/CPU detection.
-# Pinned third-party kernel: byJoey/Actions-bbr-v3 7.3.4 standard BBRv3.
+# BBR3-auto-install v0.1.0 — Debian 12/amd64 BIOS+GRUB safe installer.
+# Pinned third-party kernel: byJoey/Actions-bbr-v3 x86_64-7.3.4.
 set -Eeuo pipefail
 umask 077
 
@@ -16,7 +16,6 @@ readonly CONFIG_FILE=/etc/sysctl.d/99-bbrv3.conf
 readonly FINALIZER=/usr/local/sbin/bbr3-finalize
 readonly SERVICE=/etc/systemd/system/bbr3-finalize.service
 
-# Selected at runtime by detect_platform().
 OS_ID=''
 OS_VERSION_ID=''
 OS_CODENAME=''
@@ -29,20 +28,11 @@ IMAGE_NAME=''
 HEADERS_NAME=''
 IMAGE_SHA=''
 HEADERS_SHA=''
-BOOT_MODE=''
-ENA_MODE=''
-readonly BASE_DIR=/var/lib/bbr3-auto-install
-readonly CACHE_DIR=/var/cache/bbr3-auto-install
-readonly LOG_FILE=/var/log/bbr3-auto-install.log
-readonly CONFIG_FILE=/etc/sysctl.d/99-bbrv3.conf
-readonly FINALIZER=/usr/local/sbin/bbr3-finalize
-readonly SERVICE=/etc/systemd/system/bbr3-finalize.service
 
 ASSUME_YES=0
 BACKUP_CONFIRMED=0
 AUTO_REBOOT=1
 STATUS_ONLY=0
-DETECT_ONLY=0
 CURRENT_KERNEL=''
 OLD_ENTRY=''
 NEW_ENTRY=''
@@ -57,13 +47,11 @@ Usage: sudo bash install.sh [--yes] [--backup-confirmed] [--no-reboot] [--status
   --backup-confirmed   Confirm a restorable cloud snapshot/backup exists
   --no-reboot          Stage a one-time BBRv3 boot without rebooting now
   --status             Print kernel, BBR, FQ and install status (no changes)
-  --detect-only        Detect OS/version/CPU/boot mode; do not install
   -h, --help           Show this help
 
-Auto-detects Debian 12+ / Ubuntu 24.04+ and x86_64 / ARM64, then selects
-the matching pinned upstream .deb package. Requires GRUB + systemd;
-UEFI is accepted only when Secure Boot is confirmed disabled. Containers,
-unsupported distributions/architectures and unsafe boot layouts are rejected.
+Supported OS: Debian 12+ / Ubuntu 24.04+; CPU: x86_64/AMD64 or ARM64/AArch64.
+BIOS + GRUB + systemd only in this revision. UEFI, containers, RPM/APK
+systems and other architectures are rejected until separately validated.
 
 The default successful install REBOOTS the host. A confirmed recovery
 snapshot is mandatory, but the installer cannot verify one automatically.
@@ -81,7 +69,6 @@ for arg in "$@"; do
         --backup-confirmed) BACKUP_CONFIRMED=1 ;;
         --no-reboot) AUTO_REBOOT=0 ;;
         --status) STATUS_ONLY=1 ;;
-        --detect-only) DETECT_ONLY=1 ;;
         -h|--help) usage; exit 0 ;;
         *) die "Unknown option: $arg" ;;
     esac
@@ -104,7 +91,6 @@ status() {
 if (( STATUS_ONLY )); then status; exit 0; fi
 
 require_cmd() { command -v "$1" >/dev/null 2>&1 || die "Required command missing: $1"; }
-
 detect_platform() {
     [[ -r /etc/os-release ]] || die 'Missing /etc/os-release'
     # shellcheck disable=SC1091
@@ -161,44 +147,20 @@ detect_platform() {
     log "Selected upstream release: $TAG"
 }
 
-detect_boot_mode() {
-    if [[ -d /sys/firmware/efi ]]; then
-        BOOT_MODE=UEFI
-        local sb_state='' sb_file='' sb_value=''
-        if command -v mokutil >/dev/null 2>&1; then
-            sb_state=$(mokutil --sb-state 2>/dev/null || true)
-        fi
-        case "${sb_state,,}" in
-            *enabled*) die 'UEFI Secure Boot is enabled; unsigned third-party kernel cannot be safely booted' ;;
-            *disabled*) ;;
-            *)
-                sb_file=$(find /sys/firmware/efi/efivars -maxdepth 1 -type f -name 'SecureBoot-*' -print -quit 2>/dev/null || true)
-                [[ -n "$sb_file" && -r "$sb_file" ]] || die 'Cannot verify UEFI Secure Boot state; install mokutil or mount efivarfs'
-                sb_value=$(od -An -t u1 -j4 -N1 "$sb_file" | tr -d '[:space:]')
-                [[ "$sb_value" == 0 ]] || die "UEFI Secure Boot is enabled or indeterminate (value=$sb_value)"
-                ;;
-        esac
-    else
-        BOOT_MODE=BIOS
-    fi
-    log "Detected boot mode: $BOOT_MODE (Secure Boot must be disabled)"
-}
-
 preflight() {
     [[ ${EUID} -eq 0 ]] || die 'Run as root: sudo bash install.sh ...'
     detect_platform
-    detect_boot_mode
+    [[ ! -d /sys/firmware/efi ]] || die 'UEFI not yet supported (Secure Boot and EFI need dedicated validation)'
     [[ "$(cat /proc/1/comm)" == systemd ]] || die 'systemd must be PID 1'
     if command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt --container --quiet; then
         die 'Containers cannot replace the host kernel'
     fi
-    for c in curl sha256sum dpkg dpkg-deb apt-get uname tar awk sed grep findmnt df swapon mkswap fallocate \
+    for c in curl sha256sum dpkg dpkg-deb uname tar awk sed grep findmnt df swapon mkswap fallocate \
              ip readlink grub-editenv grub-set-default grub-reboot grub-script-check \
-             grub-probe update-grub lsinitramfs systemctl sysctl tee od tr; do
+             grub-probe update-grub lsinitramfs modinfo systemctl sysctl tee; do
         require_cmd "$c"
     done
-    [[ -s /boot/grub/grub.cfg && -f /etc/default/grub && -s /boot/grub/grubenv ]] || die 'GRUB config/defaults/environment block not found'
-    grub-editenv /boot/grub/grubenv list >/dev/null || die 'GRUB environment block is not readable'
+    [[ -s /boot/grub/grub.cfg && -f /etc/default/grub ]] || die 'GRUB boot configuration not found'
     grub-script-check /boot/grub/grub.cfg || die 'Existing GRUB config invalid'
     [[ "$(grub-probe --target=fs /boot)" == ext2 ]] || die 'Expected ext-family /boot filesystem'
     [[ -z "$(dpkg --audit)" ]] || die 'dpkg contains broken/incomplete packages'
@@ -218,7 +180,7 @@ preflight() {
     [[ -n "$iface" ]] || die 'No default IPv4 route, refusing remote kernel upgrade'
     driver=$(readlink -f "/sys/class/net/$iface/device/driver" 2>/dev/null || true)
     [[ "$driver" == */ena ]] && NEED_ENA=1
-    log "Boot mode: $BOOT_MODE; current kernel: $CURRENT_KERNEL; NIC: $iface (${driver##*/}); ENA required: $NEED_ENA"
+    log "Current kernel: $CURRENT_KERNEL; NIC: $iface (${driver##*/}); ENA required: $NEED_ENA"
 }
 
 ensure_swap() {
@@ -258,7 +220,7 @@ inspect_packages() {
     [[ "$(dpkg-deb -f "$image" Package)" == "linux-image-$KREL" ]] || die 'Unexpected image package'
     [[ "$(dpkg-deb -f "$headers" Package)" == "linux-headers-$KREL" ]] || die 'Unexpected headers package'
     for p in "$image" "$headers"; do
-        [[ "$(dpkg-deb -f "$p" Architecture)" == amd64 ]] || die "Unexpected architecture: $p"
+        [[ "$(dpkg-deb -f "$p" Architecture)" == "$DEB_ARCH" ]] || die "Unexpected architecture: $p"
         [[ "$(dpkg-deb -f "$p" Version)" == "$PKG_VERSION" ]] || die "Unexpected package version: $p"
     done
     dpkg-deb --fsys-tarfile "$image" | tar -xOf - "./boot/config-$KREL" > "$cfg" || die 'Unable to extract kernel config'
@@ -266,10 +228,9 @@ inspect_packages() {
         grep -Fxq "$key=y" "$cfg" || die "Missing required built-in $key=y"
     done
     if (( NEED_ENA )); then
-        ENA_MODE=$(sed -nE 's/^CONFIG_ENA_ETHERNET=(m|y)$/\1/p' "$cfg")
-        case "$ENA_MODE" in
-            m)
-                dpkg-deb -c "$image" | grep -E '/ena\.ko(\.(xz|gz|zst))?
+        grep -Fxq 'CONFIG_ENA_ETHERNET=m' "$cfg" || die 'Missing CONFIG_ENA_ETHERNET=m'
+        dpkg-deb -c "$image" | grep -E '/ena\.ko(\.(xz|gz|zst))?$' > "$CACHE_DIR/ena-file-list" || die 'ENA driver absent from package'
+    fi
     log 'Pinned package metadata, kernel config and AWS driver checks passed.'
 }
 
@@ -399,7 +360,6 @@ prepare_boot() {
         printf 'OLD_ENTRY=%q\n' "$OLD_ENTRY"
         printf 'NEW_ENTRY=%q\n' "$NEW_ENTRY"
         printf 'NEED_ENA=%q\n' "$NEED_ENA"
-        printf 'ENA_MODE=%q\n' "$ENA_MODE"
     } > "$BASE_DIR/boot.env"
     chmod 600 "$BASE_DIR/boot.env"
     write_finalizer
@@ -423,12 +383,6 @@ SYSCTL
 }
 
 main() {
-    if (( DETECT_ONLY )); then
-        detect_platform
-        detect_boot_mode
-        printf 'Detection complete. No packages installed and no files changed.\n'
-        return 0
-    fi
     preflight
     if (( ! BACKUP_CONFIRMED )); then
         if (( ASSUME_YES )); then die '--backup-confirmed is mandatory with --yes'; fi
@@ -445,695 +399,6 @@ main() {
     chmod 600 "$LOG_FILE"
     exec > >(tee -a "$LOG_FILE") 2>&1
     log "Starting installer $VERSION on $(uname -r) for $OS_PRETTY_NAME / $MACHINE_ARCH"
-
-    if [[ "$(uname -r)" == "$KREL" ]]; then
-        log 'Target kernel already running; checking configuration without reinstalling.'
-        configure_tcp
-        if [[ -r "$BASE_DIR/boot.env" ]]; then
-            # shellcheck disable=SC1090
-            . "$BASE_DIR/boot.env"
-            grub-set-default "$NEW_ENTRY"
-        fi
-        log 'Already on BBRv3; no reboot required.'
-        return 0
-    fi
-    ensure_swap
-    backup_existing
-    fetch_verified "$IMAGE_NAME" "$IMAGE_SHA"
-    fetch_verified "$HEADERS_NAME" "$HEADERS_SHA"
-    inspect_packages
-    protect_fallback_before_install
-    log 'Installing verified image and headers (does not replace old kernel).'
-    dpkg -i "$CACHE_DIR/$IMAGE_NAME" "$CACHE_DIR/$HEADERS_NAME"
-    [[ -s "/boot/vmlinuz-$KREL" && -s "/boot/initrd.img-$KREL" ]] || die 'Missing new kernel/initrd'
-    [[ -z "$(dpkg --audit)" ]] || die 'dpkg package state invalid after install'
-    modinfo -k "$KREL" ena >/dev/null || die 'New ENA module missing after install'
-    if (( NEED_ENA )) && [[ "$ENA_MODE" == m ]]; then
-        modinfo -k "$KREL" ena >/dev/null || die 'New ENA module missing after install'
-        lsinitramfs "/boot/initrd.img-$KREL" | grep -E '/ena\.ko(\.(xz|gz|zst))?
-    configure_tcp
-    prepare_boot
-    log "Installer completed; log: $LOG_FILE"
-    if (( AUTO_REBOOT )); then
-        log 'Rebooting for one-time BBRv3 test. On failure, manually reboot via console to revert.'
-        systemctl reboot
-    else
-        log 'No reboot (--no-reboot). A later reboot will test BBRv3 once.'
-    fi
-}
-
-main
- > "$CACHE_DIR/ena-file-list" || die 'ENA module absent from package'
-                ;;
-            y)
-                log 'ENA driver is built into the kernel; no separate .ko/initramfs entry is expected.'
-                ;;
-            *)
-                die 'Target kernel has no usable ENA driver (CONFIG_ENA_ETHERNET missing)'
-                ;;
-        esac
-    fi
-    log 'Pinned package metadata, kernel config and AWS driver checks passed.'
-}
-
-# Never let dpkg's automatic update-grub make an untested kernel the default.
-protect_fallback_before_install() {
-    local sub_id old_id old_full
-    sub_id=$(extract_entry 'gnulinux-advanced-')
-    old_id=$(extract_entry "gnulinux-${CURRENT_KERNEL}-advanced-")
-    [[ -n "$sub_id" && -n "$old_id" ]] || die 'Cannot identify currently running kernel in GRUB'
-    old_full="$sub_id>$old_id"
-    if grep -Eq '^GRUB_DEFAULT=' /etc/default/grub; then
-        sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT=saved/' /etc/default/grub
-    else
-        printf '%s\n' 'GRUB_DEFAULT=saved' >> /etc/default/grub
-    fi
-    if grep -Eq '^GRUB_SAVEDEFAULT=' /etc/default/grub; then
-        sed -i 's/^GRUB_SAVEDEFAULT=.*/GRUB_SAVEDEFAULT=false/' /etc/default/grub
-    else
-        printf '%s\n' 'GRUB_SAVEDEFAULT=false' >> /etc/default/grub
-    fi
-    update-grub
-    grub-script-check /boot/grub/grub.cfg
-    grub-set-default "$old_full"
-    grep -Fxq "saved_entry=$old_full" <(grub-editenv list) || die 'Could not secure old kernel as default'
-    log "Old kernel pinned as default BEFORE package installation: $CURRENT_KERNEL"
-}
-
-backup_existing() {
-    local dest
-    dest="$BASE_DIR/backups/$(date +%Y%m%d-%H%M%S)"
-    mkdir -p "$dest"
-    cp -a /etc/default/grub /boot/grub/grub.cfg /boot/grub/grubenv "$dest/"
-    cp -a "/boot/vmlinuz-$CURRENT_KERNEL" "/boot/initrd.img-$CURRENT_KERNEL" "$dest/"
-    dpkg-query -W > "$dest/packages.txt"
-    log "Boot configuration backup: $dest"
-}
-
-write_finalizer() {
-    mkdir -p "$BASE_DIR"
-    cat > "$FINALIZER" <<'FINALIZER_SCRIPT'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-umask 077
-BASE=/var/lib/bbr3-auto-install
-LOG=/var/log/bbr3-auto-install.log
-exec >> "$LOG" 2>&1
-printf '[BBR3 finalize] %s starting; kernel=%s\n' "$(date -Is)" "$(uname -r)"
-# The state file is installed root-owned, mode 0600.
-# shellcheck disable=SC1091
-. "$BASE/boot.env"
-if [[ "$(uname -r)" != "$KREL" ]]; then
-    printf '[BBR3 finalize] Old kernel booted. Fallback remains default.\n'
-    printf '%s\n' 'status=fallback' > "$BASE/result"
-    systemctl disable bbr3-finalize.service || true
-    exit 0
-fi
-sysctl -p /etc/sysctl.d/99-bbrv3.conf
-[[ "$(sysctl -n net.ipv4.tcp_congestion_control)" == bbr ]]
-[[ "$(sysctl -n net.core.default_qdisc)" == fq ]]
-[[ -n "$(ip -4 route show default)" ]]
-[[ -n "$(findmnt -no SOURCE /)" ]]
-if [[ "$NEED_ENA" == 1 ]]; then
-    iface=$(ip -4 route show default | awk 'NR==1 {for(i=1;i<=NF;i++) if($i=="dev") {print $(i+1); exit}}')
-    [[ "$(readlink -f "/sys/class/net/$iface/device/driver")" == */ena ]]
-fi
-# Only commit the kernel after successful post-boot checks.
-grub-set-default "$NEW_ENTRY"
-grep -Fxq "saved_entry=$NEW_ENTRY" <(grub-editenv list)
-printf 'status=success\nkernel=%s\nchecked_at=%s\n' "$KREL" "$(date -Is)" > "$BASE/result"
-systemctl disable bbr3-finalize.service || true
-printf '[BBR3 finalize] SUCCESS; BBRv3 is now GRUB default.\n'
-FINALIZER_SCRIPT
-    chmod 700 "$FINALIZER"
-
-    cat > "$SERVICE" <<'UNIT'
-[Unit]
-Description=Validate BBRv3 boot and commit GRUB default only on success
-Wants=network-online.target
-After=network-online.target systemd-sysctl.service
-ConditionPathExists=/var/lib/bbr3-auto-install/boot.env
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/bbr3-finalize
-TimeoutStartSec=90
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-    systemctl daemon-reload
-    systemctl enable bbr3-finalize.service
-}
-
-extract_entry() {
-    local pattern=$1
-    sed -nE "s/.*'(${pattern}[^']+)'.*/\\1/p" /boot/grub/grub.cfg | head -n 1
-}
-
-prepare_boot() {
-    local sub_id old_id new_id old_full new_full
-    # Saved-by-ID is stable across menu ordering changes; do not use menu index 0.
-    sub_id=$(extract_entry 'gnulinux-advanced-')
-    old_id=$(extract_entry "gnulinux-${CURRENT_KERNEL}-advanced-")
-    new_id=$(extract_entry "gnulinux-${KREL}-advanced-")
-    [[ -n "$sub_id" && -n "$old_id" && -n "$new_id" ]] || die 'Could not locate old/new GRUB advanced menu IDs'
-    old_full="$sub_id>$old_id"
-    new_full="$sub_id>$new_id"
-
-    if grep -Eq '^GRUB_DEFAULT=' /etc/default/grub; then
-        sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT=saved/' /etc/default/grub
-    else
-        printf '%s\n' 'GRUB_DEFAULT=saved' >> /etc/default/grub
-    fi
-    if grep -Eq '^GRUB_SAVEDEFAULT=' /etc/default/grub; then
-        sed -i 's/^GRUB_SAVEDEFAULT=.*/GRUB_SAVEDEFAULT=false/' /etc/default/grub
-    else
-        printf '%s\n' 'GRUB_SAVEDEFAULT=false' >> /etc/default/grub
-    fi
-    update-grub
-    grub-script-check /boot/grub/grub.cfg
-    # Set fallback first. If anything goes wrong, the normal boot stays old.
-    grub-set-default "$old_full"
-    OLD_ENTRY=$old_full
-    NEW_ENTRY=$new_full
-    {
-        printf 'KREL=%q\n' "$KREL"
-        printf 'OLD_ENTRY=%q\n' "$OLD_ENTRY"
-        printf 'NEW_ENTRY=%q\n' "$NEW_ENTRY"
-        printf 'NEED_ENA=%q\n' "$NEED_ENA"
-    } > "$BASE_DIR/boot.env"
-    chmod 600 "$BASE_DIR/boot.env"
-    write_finalizer
-    grub-reboot "$new_full"
-    grep -Fxq "saved_entry=$old_full" <(grub-editenv list) || die 'Fallback default verification failed'
-    grep -Fxq "next_entry=$new_full" <(grub-editenv list) || die 'One-shot BBRv3 GRUB entry verification failed'
-    log 'Safe boot staged: old kernel is default; BBRv3 selected for NEXT BOOT ONLY.'
-}
-
-configure_tcp() {
-    cat > "$CONFIG_FILE" <<'SYSCTL'
-# BBR3-auto-install: requires a verified BBRv3-patched kernel
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
-SYSCTL
-    if [[ "$(uname -r)" == "$KREL" ]]; then
-        sysctl -p "$CONFIG_FILE"
-    else
-        log 'Saved BBR/FQ sysctl settings for new kernel; leaving old kernel running configuration unchanged.'
-    fi
-}
-
-main() {
-    preflight
-    if (( ! BACKUP_CONFIRMED )); then
-        if (( ASSUME_YES )); then die '--backup-confirmed is mandatory with --yes'; fi
-        printf '%s\n' 'WARNING: A restorable snapshot/backup AND console recovery access are required.'
-        read -r -p 'Do you have both? Type YES: ' reply
-        [[ "$reply" == YES ]] || die 'Backup/recovery not confirmed'
-    fi
-    if (( ! ASSUME_YES )); then
-        read -r -p "Install $KREL and reboot after staging? Type INSTALL: " reply
-        [[ "$reply" == INSTALL ]] || die 'Cancelled by user'
-    fi
-    mkdir -p "$BASE_DIR"
-    touch "$LOG_FILE"
-    chmod 600 "$LOG_FILE"
-    exec > >(tee -a "$LOG_FILE") 2>&1
-    log "Starting installer $VERSION on $(uname -r)"
-
-    if [[ "$(uname -r)" == "$KREL" ]]; then
-        log 'Target kernel already running; checking configuration without reinstalling.'
-        configure_tcp
-        if [[ -r "$BASE_DIR/boot.env" ]]; then
-            # shellcheck disable=SC1090
-            . "$BASE_DIR/boot.env"
-            grub-set-default "$NEW_ENTRY"
-        fi
-        log 'Already on BBRv3; no reboot required.'
-        return 0
-    fi
-    ensure_swap
-    backup_existing
-    fetch_verified "$IMAGE_NAME" "$IMAGE_SHA"
-    fetch_verified "$HEADERS_NAME" "$HEADERS_SHA"
-    inspect_packages
-    protect_fallback_before_install
-    log 'Installing verified image and headers (does not replace old kernel).'
-    dpkg -i "$CACHE_DIR/$IMAGE_NAME" "$CACHE_DIR/$HEADERS_NAME"
-    [[ -s "/boot/vmlinuz-$KREL" && -s "/boot/initrd.img-$KREL" ]] || die 'Missing new kernel/initrd'
-    [[ -z "$(dpkg --audit)" ]] || die 'dpkg package state invalid after install'
-    if (( NEED_ENA )) && [[ "$ENA_MODE" == m ]]; then
-        modinfo -k "$KREL" ena >/dev/null || die 'New ENA module missing after install'
-        lsinitramfs "/boot/initrd.img-$KREL" | grep -E '/ena\.ko(\.(xz|gz|zst))?
-    configure_tcp
-    prepare_boot
-    log "Installer completed; log: $LOG_FILE"
-    if (( AUTO_REBOOT )); then
-        log 'Rebooting for one-time BBRv3 test. On failure, manually reboot via console to revert.'
-        systemctl reboot
-    else
-        log 'No reboot (--no-reboot). A later reboot will test BBRv3 once.'
-    fi
-}
-
-main
- > "$CACHE_DIR/ena-initrd-list" || die 'ENA module missing from initramfs'
-    fi
-    configure_tcp
-    prepare_boot
-    log "Installer completed; log: $LOG_FILE"
-    if (( AUTO_REBOOT )); then
-        log 'Rebooting for one-time BBRv3 test. On failure, manually reboot via console to revert.'
-        systemctl reboot
-    else
-        log 'No reboot (--no-reboot). A later reboot will test BBRv3 once.'
-    fi
-}
-
-main
- > "$CACHE_DIR/ena-file-list" || die 'ENA module absent from package'
-                ;;
-            y)
-                log 'ENA driver is built into the kernel; no separate .ko/initramfs entry is expected.'
-                ;;
-            *)
-                die 'Target kernel has no usable ENA driver (CONFIG_ENA_ETHERNET missing)'
-                ;;
-        esac
-    fi
-    log 'Pinned package metadata, kernel config and AWS driver checks passed.'
-}
-
-# Never let dpkg's automatic update-grub make an untested kernel the default.
-protect_fallback_before_install() {
-    local sub_id old_id old_full
-    sub_id=$(extract_entry 'gnulinux-advanced-')
-    old_id=$(extract_entry "gnulinux-${CURRENT_KERNEL}-advanced-")
-    [[ -n "$sub_id" && -n "$old_id" ]] || die 'Cannot identify currently running kernel in GRUB'
-    old_full="$sub_id>$old_id"
-    if grep -Eq '^GRUB_DEFAULT=' /etc/default/grub; then
-        sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT=saved/' /etc/default/grub
-    else
-        printf '%s\n' 'GRUB_DEFAULT=saved' >> /etc/default/grub
-    fi
-    if grep -Eq '^GRUB_SAVEDEFAULT=' /etc/default/grub; then
-        sed -i 's/^GRUB_SAVEDEFAULT=.*/GRUB_SAVEDEFAULT=false/' /etc/default/grub
-    else
-        printf '%s\n' 'GRUB_SAVEDEFAULT=false' >> /etc/default/grub
-    fi
-    update-grub
-    grub-script-check /boot/grub/grub.cfg
-    grub-set-default "$old_full"
-    grep -Fxq "saved_entry=$old_full" <(grub-editenv list) || die 'Could not secure old kernel as default'
-    log "Old kernel pinned as default BEFORE package installation: $CURRENT_KERNEL"
-}
-
-backup_existing() {
-    local dest
-    dest="$BASE_DIR/backups/$(date +%Y%m%d-%H%M%S)"
-    mkdir -p "$dest"
-    cp -a /etc/default/grub /boot/grub/grub.cfg /boot/grub/grubenv "$dest/"
-    cp -a "/boot/vmlinuz-$CURRENT_KERNEL" "/boot/initrd.img-$CURRENT_KERNEL" "$dest/"
-    dpkg-query -W > "$dest/packages.txt"
-    log "Boot configuration backup: $dest"
-}
-
-write_finalizer() {
-    mkdir -p "$BASE_DIR"
-    cat > "$FINALIZER" <<'FINALIZER_SCRIPT'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-umask 077
-BASE=/var/lib/bbr3-auto-install
-LOG=/var/log/bbr3-auto-install.log
-exec >> "$LOG" 2>&1
-printf '[BBR3 finalize] %s starting; kernel=%s\n' "$(date -Is)" "$(uname -r)"
-# The state file is installed root-owned, mode 0600.
-# shellcheck disable=SC1091
-. "$BASE/boot.env"
-if [[ "$(uname -r)" != "$KREL" ]]; then
-    printf '[BBR3 finalize] Old kernel booted. Fallback remains default.\n'
-    printf '%s\n' 'status=fallback' > "$BASE/result"
-    systemctl disable bbr3-finalize.service || true
-    exit 0
-fi
-sysctl -p /etc/sysctl.d/99-bbrv3.conf
-[[ "$(sysctl -n net.ipv4.tcp_congestion_control)" == bbr ]]
-[[ "$(sysctl -n net.core.default_qdisc)" == fq ]]
-[[ -n "$(ip -4 route show default)" ]]
-[[ -n "$(findmnt -no SOURCE /)" ]]
-if [[ "$NEED_ENA" == 1 ]]; then
-    iface=$(ip -4 route show default | awk 'NR==1 {for(i=1;i<=NF;i++) if($i=="dev") {print $(i+1); exit}}')
-    [[ "$(readlink -f "/sys/class/net/$iface/device/driver")" == */ena ]]
-fi
-# Only commit the kernel after successful post-boot checks.
-grub-set-default "$NEW_ENTRY"
-grep -Fxq "saved_entry=$NEW_ENTRY" <(grub-editenv list)
-printf 'status=success\nkernel=%s\nchecked_at=%s\n' "$KREL" "$(date -Is)" > "$BASE/result"
-systemctl disable bbr3-finalize.service || true
-printf '[BBR3 finalize] SUCCESS; BBRv3 is now GRUB default.\n'
-FINALIZER_SCRIPT
-    chmod 700 "$FINALIZER"
-
-    cat > "$SERVICE" <<'UNIT'
-[Unit]
-Description=Validate BBRv3 boot and commit GRUB default only on success
-Wants=network-online.target
-After=network-online.target systemd-sysctl.service
-ConditionPathExists=/var/lib/bbr3-auto-install/boot.env
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/bbr3-finalize
-TimeoutStartSec=90
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-    systemctl daemon-reload
-    systemctl enable bbr3-finalize.service
-}
-
-extract_entry() {
-    local pattern=$1
-    sed -nE "s/.*'(${pattern}[^']+)'.*/\\1/p" /boot/grub/grub.cfg | head -n 1
-}
-
-prepare_boot() {
-    local sub_id old_id new_id old_full new_full
-    # Saved-by-ID is stable across menu ordering changes; do not use menu index 0.
-    sub_id=$(extract_entry 'gnulinux-advanced-')
-    old_id=$(extract_entry "gnulinux-${CURRENT_KERNEL}-advanced-")
-    new_id=$(extract_entry "gnulinux-${KREL}-advanced-")
-    [[ -n "$sub_id" && -n "$old_id" && -n "$new_id" ]] || die 'Could not locate old/new GRUB advanced menu IDs'
-    old_full="$sub_id>$old_id"
-    new_full="$sub_id>$new_id"
-
-    if grep -Eq '^GRUB_DEFAULT=' /etc/default/grub; then
-        sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT=saved/' /etc/default/grub
-    else
-        printf '%s\n' 'GRUB_DEFAULT=saved' >> /etc/default/grub
-    fi
-    if grep -Eq '^GRUB_SAVEDEFAULT=' /etc/default/grub; then
-        sed -i 's/^GRUB_SAVEDEFAULT=.*/GRUB_SAVEDEFAULT=false/' /etc/default/grub
-    else
-        printf '%s\n' 'GRUB_SAVEDEFAULT=false' >> /etc/default/grub
-    fi
-    update-grub
-    grub-script-check /boot/grub/grub.cfg
-    # Set fallback first. If anything goes wrong, the normal boot stays old.
-    grub-set-default "$old_full"
-    OLD_ENTRY=$old_full
-    NEW_ENTRY=$new_full
-    {
-        printf 'KREL=%q\n' "$KREL"
-        printf 'OLD_ENTRY=%q\n' "$OLD_ENTRY"
-        printf 'NEW_ENTRY=%q\n' "$NEW_ENTRY"
-        printf 'NEED_ENA=%q\n' "$NEED_ENA"
-    } > "$BASE_DIR/boot.env"
-    chmod 600 "$BASE_DIR/boot.env"
-    write_finalizer
-    grub-reboot "$new_full"
-    grep -Fxq "saved_entry=$old_full" <(grub-editenv list) || die 'Fallback default verification failed'
-    grep -Fxq "next_entry=$new_full" <(grub-editenv list) || die 'One-shot BBRv3 GRUB entry verification failed'
-    log 'Safe boot staged: old kernel is default; BBRv3 selected for NEXT BOOT ONLY.'
-}
-
-configure_tcp() {
-    cat > "$CONFIG_FILE" <<'SYSCTL'
-# BBR3-auto-install: requires a verified BBRv3-patched kernel
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
-SYSCTL
-    if [[ "$(uname -r)" == "$KREL" ]]; then
-        sysctl -p "$CONFIG_FILE"
-    else
-        log 'Saved BBR/FQ sysctl settings for new kernel; leaving old kernel running configuration unchanged.'
-    fi
-}
-
-main() {
-    preflight
-    if (( ! BACKUP_CONFIRMED )); then
-        if (( ASSUME_YES )); then die '--backup-confirmed is mandatory with --yes'; fi
-        printf '%s\n' 'WARNING: A restorable snapshot/backup AND console recovery access are required.'
-        read -r -p 'Do you have both? Type YES: ' reply
-        [[ "$reply" == YES ]] || die 'Backup/recovery not confirmed'
-    fi
-    if (( ! ASSUME_YES )); then
-        read -r -p "Install $KREL and reboot after staging? Type INSTALL: " reply
-        [[ "$reply" == INSTALL ]] || die 'Cancelled by user'
-    fi
-    mkdir -p "$BASE_DIR"
-    touch "$LOG_FILE"
-    chmod 600 "$LOG_FILE"
-    exec > >(tee -a "$LOG_FILE") 2>&1
-    log "Starting installer $VERSION on $(uname -r)"
-
-    if [[ "$(uname -r)" == "$KREL" ]]; then
-        log 'Target kernel already running; checking configuration without reinstalling.'
-        configure_tcp
-        if [[ -r "$BASE_DIR/boot.env" ]]; then
-            # shellcheck disable=SC1090
-            . "$BASE_DIR/boot.env"
-            grub-set-default "$NEW_ENTRY"
-        fi
-        log 'Already on BBRv3; no reboot required.'
-        return 0
-    fi
-    ensure_swap
-    backup_existing
-    fetch_verified "$IMAGE_NAME" "$IMAGE_SHA"
-    fetch_verified "$HEADERS_NAME" "$HEADERS_SHA"
-    inspect_packages
-    protect_fallback_before_install
-    log 'Installing verified image and headers (does not replace old kernel).'
-    dpkg -i "$CACHE_DIR/$IMAGE_NAME" "$CACHE_DIR/$HEADERS_NAME"
-    [[ -s "/boot/vmlinuz-$KREL" && -s "/boot/initrd.img-$KREL" ]] || die 'Missing new kernel/initrd'
-    [[ -z "$(dpkg --audit)" ]] || die 'dpkg package state invalid after install'
-    modinfo -k "$KREL" ena >/dev/null || die 'New ENA module missing after install'
-    if (( NEED_ENA )); then
-        lsinitramfs "/boot/initrd.img-$KREL" | grep -E '/ena\.ko(\.(xz|gz|zst))?$' > "$CACHE_DIR/ena-initrd-list" || die 'ENA missing from initramfs'
-    fi
-    configure_tcp
-    prepare_boot
-    log "Installer completed; log: $LOG_FILE"
-    if (( AUTO_REBOOT )); then
-        log 'Rebooting for one-time BBRv3 test. On failure, manually reboot via console to revert.'
-        systemctl reboot
-    else
-        log 'No reboot (--no-reboot). A later reboot will test BBRv3 once.'
-    fi
-}
-
-main
- > "$CACHE_DIR/ena-initrd-list" || die 'ENA module missing from initramfs'
-    fi
-    configure_tcp
-    prepare_boot
-    log "Installer completed; log: $LOG_FILE"
-    if (( AUTO_REBOOT )); then
-        log 'Rebooting for one-time BBRv3 test. On failure, manually reboot via console to revert.'
-        systemctl reboot
-    else
-        log 'No reboot (--no-reboot). A later reboot will test BBRv3 once.'
-    fi
-}
-
-main
- > "$CACHE_DIR/ena-initrd-list" || die 'ENA module missing from initramfs'
-    fi
-    configure_tcp
-    prepare_boot
-    log "Installer completed; log: $LOG_FILE"
-    if (( AUTO_REBOOT )); then
-        log 'Rebooting for one-time BBRv3 test. On failure, manually reboot via console to revert.'
-        systemctl reboot
-    else
-        log 'No reboot (--no-reboot). A later reboot will test BBRv3 once.'
-    fi
-}
-
-main
- > "$CACHE_DIR/ena-file-list" || die 'ENA module absent from package'
-                ;;
-            y)
-                log 'ENA driver is built into the kernel; no separate .ko/initramfs entry is expected.'
-                ;;
-            *)
-                die 'Target kernel has no usable ENA driver (CONFIG_ENA_ETHERNET missing)'
-                ;;
-        esac
-    fi
-    log 'Pinned package metadata, kernel config and AWS driver checks passed.'
-}
-
-# Never let dpkg's automatic update-grub make an untested kernel the default.
-protect_fallback_before_install() {
-    local sub_id old_id old_full
-    sub_id=$(extract_entry 'gnulinux-advanced-')
-    old_id=$(extract_entry "gnulinux-${CURRENT_KERNEL}-advanced-")
-    [[ -n "$sub_id" && -n "$old_id" ]] || die 'Cannot identify currently running kernel in GRUB'
-    old_full="$sub_id>$old_id"
-    if grep -Eq '^GRUB_DEFAULT=' /etc/default/grub; then
-        sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT=saved/' /etc/default/grub
-    else
-        printf '%s\n' 'GRUB_DEFAULT=saved' >> /etc/default/grub
-    fi
-    if grep -Eq '^GRUB_SAVEDEFAULT=' /etc/default/grub; then
-        sed -i 's/^GRUB_SAVEDEFAULT=.*/GRUB_SAVEDEFAULT=false/' /etc/default/grub
-    else
-        printf '%s\n' 'GRUB_SAVEDEFAULT=false' >> /etc/default/grub
-    fi
-    update-grub
-    grub-script-check /boot/grub/grub.cfg
-    grub-set-default "$old_full"
-    grep -Fxq "saved_entry=$old_full" <(grub-editenv list) || die 'Could not secure old kernel as default'
-    log "Old kernel pinned as default BEFORE package installation: $CURRENT_KERNEL"
-}
-
-backup_existing() {
-    local dest
-    dest="$BASE_DIR/backups/$(date +%Y%m%d-%H%M%S)"
-    mkdir -p "$dest"
-    cp -a /etc/default/grub /boot/grub/grub.cfg /boot/grub/grubenv "$dest/"
-    cp -a "/boot/vmlinuz-$CURRENT_KERNEL" "/boot/initrd.img-$CURRENT_KERNEL" "$dest/"
-    dpkg-query -W > "$dest/packages.txt"
-    log "Boot configuration backup: $dest"
-}
-
-write_finalizer() {
-    mkdir -p "$BASE_DIR"
-    cat > "$FINALIZER" <<'FINALIZER_SCRIPT'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-umask 077
-BASE=/var/lib/bbr3-auto-install
-LOG=/var/log/bbr3-auto-install.log
-exec >> "$LOG" 2>&1
-printf '[BBR3 finalize] %s starting; kernel=%s\n' "$(date -Is)" "$(uname -r)"
-# The state file is installed root-owned, mode 0600.
-# shellcheck disable=SC1091
-. "$BASE/boot.env"
-if [[ "$(uname -r)" != "$KREL" ]]; then
-    printf '[BBR3 finalize] Old kernel booted. Fallback remains default.\n'
-    printf '%s\n' 'status=fallback' > "$BASE/result"
-    systemctl disable bbr3-finalize.service || true
-    exit 0
-fi
-sysctl -p /etc/sysctl.d/99-bbrv3.conf
-[[ "$(sysctl -n net.ipv4.tcp_congestion_control)" == bbr ]]
-[[ "$(sysctl -n net.core.default_qdisc)" == fq ]]
-[[ -n "$(ip -4 route show default)" ]]
-[[ -n "$(findmnt -no SOURCE /)" ]]
-if [[ "$NEED_ENA" == 1 ]]; then
-    iface=$(ip -4 route show default | awk 'NR==1 {for(i=1;i<=NF;i++) if($i=="dev") {print $(i+1); exit}}')
-    [[ "$(readlink -f "/sys/class/net/$iface/device/driver")" == */ena ]]
-fi
-# Only commit the kernel after successful post-boot checks.
-grub-set-default "$NEW_ENTRY"
-grep -Fxq "saved_entry=$NEW_ENTRY" <(grub-editenv list)
-printf 'status=success\nkernel=%s\nchecked_at=%s\n' "$KREL" "$(date -Is)" > "$BASE/result"
-systemctl disable bbr3-finalize.service || true
-printf '[BBR3 finalize] SUCCESS; BBRv3 is now GRUB default.\n'
-FINALIZER_SCRIPT
-    chmod 700 "$FINALIZER"
-
-    cat > "$SERVICE" <<'UNIT'
-[Unit]
-Description=Validate BBRv3 boot and commit GRUB default only on success
-Wants=network-online.target
-After=network-online.target systemd-sysctl.service
-ConditionPathExists=/var/lib/bbr3-auto-install/boot.env
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/bbr3-finalize
-TimeoutStartSec=90
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-    systemctl daemon-reload
-    systemctl enable bbr3-finalize.service
-}
-
-extract_entry() {
-    local pattern=$1
-    sed -nE "s/.*'(${pattern}[^']+)'.*/\\1/p" /boot/grub/grub.cfg | head -n 1
-}
-
-prepare_boot() {
-    local sub_id old_id new_id old_full new_full
-    # Saved-by-ID is stable across menu ordering changes; do not use menu index 0.
-    sub_id=$(extract_entry 'gnulinux-advanced-')
-    old_id=$(extract_entry "gnulinux-${CURRENT_KERNEL}-advanced-")
-    new_id=$(extract_entry "gnulinux-${KREL}-advanced-")
-    [[ -n "$sub_id" && -n "$old_id" && -n "$new_id" ]] || die 'Could not locate old/new GRUB advanced menu IDs'
-    old_full="$sub_id>$old_id"
-    new_full="$sub_id>$new_id"
-
-    if grep -Eq '^GRUB_DEFAULT=' /etc/default/grub; then
-        sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT=saved/' /etc/default/grub
-    else
-        printf '%s\n' 'GRUB_DEFAULT=saved' >> /etc/default/grub
-    fi
-    if grep -Eq '^GRUB_SAVEDEFAULT=' /etc/default/grub; then
-        sed -i 's/^GRUB_SAVEDEFAULT=.*/GRUB_SAVEDEFAULT=false/' /etc/default/grub
-    else
-        printf '%s\n' 'GRUB_SAVEDEFAULT=false' >> /etc/default/grub
-    fi
-    update-grub
-    grub-script-check /boot/grub/grub.cfg
-    # Set fallback first. If anything goes wrong, the normal boot stays old.
-    grub-set-default "$old_full"
-    OLD_ENTRY=$old_full
-    NEW_ENTRY=$new_full
-    {
-        printf 'KREL=%q\n' "$KREL"
-        printf 'OLD_ENTRY=%q\n' "$OLD_ENTRY"
-        printf 'NEW_ENTRY=%q\n' "$NEW_ENTRY"
-        printf 'NEED_ENA=%q\n' "$NEED_ENA"
-    } > "$BASE_DIR/boot.env"
-    chmod 600 "$BASE_DIR/boot.env"
-    write_finalizer
-    grub-reboot "$new_full"
-    grep -Fxq "saved_entry=$old_full" <(grub-editenv list) || die 'Fallback default verification failed'
-    grep -Fxq "next_entry=$new_full" <(grub-editenv list) || die 'One-shot BBRv3 GRUB entry verification failed'
-    log 'Safe boot staged: old kernel is default; BBRv3 selected for NEXT BOOT ONLY.'
-}
-
-configure_tcp() {
-    cat > "$CONFIG_FILE" <<'SYSCTL'
-# BBR3-auto-install: requires a verified BBRv3-patched kernel
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
-SYSCTL
-    if [[ "$(uname -r)" == "$KREL" ]]; then
-        sysctl -p "$CONFIG_FILE"
-    else
-        log 'Saved BBR/FQ sysctl settings for new kernel; leaving old kernel running configuration unchanged.'
-    fi
-}
-
-main() {
-    preflight
-    if (( ! BACKUP_CONFIRMED )); then
-        if (( ASSUME_YES )); then die '--backup-confirmed is mandatory with --yes'; fi
-        printf '%s\n' 'WARNING: A restorable snapshot/backup AND console recovery access are required.'
-        read -r -p 'Do you have both? Type YES: ' reply
-        [[ "$reply" == YES ]] || die 'Backup/recovery not confirmed'
-    fi
-    if (( ! ASSUME_YES )); then
-        read -r -p "Install $KREL and reboot after staging? Type INSTALL: " reply
-        [[ "$reply" == INSTALL ]] || die 'Cancelled by user'
-    fi
-    mkdir -p "$BASE_DIR"
-    touch "$LOG_FILE"
-    chmod 600 "$LOG_FILE"
-    exec > >(tee -a "$LOG_FILE") 2>&1
-    log "Starting installer $VERSION on $(uname -r)"
 
     if [[ "$(uname -r)" == "$KREL" ]]; then
         log 'Target kernel already running; checking configuration without reinstalling.'
