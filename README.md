@@ -38,13 +38,13 @@ sudo systemctl status bbr3-finalize.service --no-pager
 
 1. 自动检测发行版、版本、CPU 架构，并校验系统架构与 DEB 包架构一致；当前允许 Debian 12+ / Ubuntu 24.04+、x86_64 / ARM64。随后检测 BIOS + GRUB、systemd、当前内核回退镜像、可用磁盘、dpkg 和 IPv4 默认路由；拒绝 UEFI、容器及其他未经验证的启动组合。
 2. 自动读取 `/proc/meminfo` 的 RAM 和当前已启用 Swap，按总 Swap 目标分档：RAM <1 GiB → 2 GiB；1–2 GiB → 1 GiB；2–4 GiB → 512 MiB；RAM ≥4 GiB 不主动改动 Swap。已有 Swap（包括 zram）计入总量，只补足差额，不关闭或调整现有 Swap。
-3. 备份 GRUB 配置和旧内核启动文件；**在安装内核包之前**设置旧内核为默认启动项。
-4. 从固定的第三方 Release 下载并校验 Image / Headers 的 **固定 SHA256**；验证包名、版本、内核配置及 AWS ENA 驱动。
+4. 备份 GRUB 配置和旧内核启动文件；**在安装内核包之前**设置旧内核为默认启动项。
+5. 从固定的第三方 Release 下载并校验 Image / Headers 的 **固定 SHA256**；验证包名、版本、内核配置及 AWS ENA 驱动。
 3. Swap 文件采用 `/swapfile-bbr3`（若已被占用则选择带序号的新路径），权限设为 `0600`，优先使用 `fallocate`，失败时回退到 `dd`；写入 `/etc/fstab` 的 `nofail` 持久化条目，并在失败时回滚新增条目。原始 fstab 会先备份。创建前检查剩余磁盘空间，必须额外保留 Swap 文件大小 + 3 GiB 安装空间 + 512 MiB 余量；空间不足时安全终止。
-5. 使用 `dpkg -i` 安装新内核并生成 initramfs；检查文件、dpkg 状态和 ENA 模块是否正确放入 initramfs。
-6. 写入 `99-bbrv3.conf`（`bbr` + `fq`）。旧内核运行时仅写文件，不提前切换旧内核的拥塞控制。
-7. 设置 GRUB `saved_entry=旧内核` 和 `next_entry=新内核`，安装 `bbr3-finalize.service`，随后自动重启（除非指定 `--no-reboot`）。
-8. 新内核启动后检查 BBR、FQ、默认路由、根文件系统、AWS ENA（如适用）；**全部成功才把新内核保存为永久默认**。验证失败时旧内核仍是下一次正常启动的默认选择。
+6. 使用 `dpkg -i` 安装新内核并生成 initramfs；检查文件、dpkg 状态和 ENA 模块是否正确放入 initramfs。
+7. 写入 `99-bbrv3.conf`（`bbr` + `fq`）。旧内核运行时仅写文件，不提前切换旧内核的拥塞控制。
+8. 设置 GRUB `saved_entry=旧内核` 和 `next_entry=新内核`，安装 `bbr3-finalize.service`，随后自动重启（除非指定 `--no-reboot`）。
+9. 新内核启动后检查 BBR、FQ、默认路由、根文件系统、AWS ENA（如适用）；**全部成功才把新内核保存为永久默认**。验证失败时旧内核仍是下一次正常启动的默认选择。
 
 > **回退边界**：GRUB 一次性启动并不提供硬件级自动重启。如果新内核卡在启动阶段、无法联网或 systemd 没有启动，可能需要使用云控制台/Serial Console **手动触发一次重启**以回到旧内核；如果连 GRUB/磁盘也损坏，则使用预先创建的快照恢复。自检检查本机网络状态，不等价于外部端到端 SSH/性能验证。系统更新或其他 GRUB 工具以后仍可能修改默认菜单。
 
@@ -88,5 +88,5 @@ sudo grub-editenv list
 
 - 仅用于你有管理权限的服务器。
 - 第三方内核包由上游维护，不是 Debian 官方内核；项目不对上游可执行代码作安全担保。
-- v0.2.0 不会安装或重写 GRUB 引导扇区，也不会卸载原内核；但会修改 GRUB 配置、sysctl 和 systemd 服务。
+- v0.2.1 不会安装或重写 GRUB 引导扇区，也不会卸载原内核；但会修改 GRUB 配置、sysctl 和 systemd 服务。
 - 自动重启会中断当前会话及业务，生产环境应安排维护窗口。
