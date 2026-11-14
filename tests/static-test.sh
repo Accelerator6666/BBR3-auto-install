@@ -26,5 +26,19 @@ assert 'aarch64:arm64' in p
 assert 'linux-image-${KREL}_${PKG_VERSION}_${DEB_ARCH}.deb' in p
 assert '0ef3e4bc20726998b007a9574cead3854b9825948139bf54146e0ac4ef738317' in p
 assert '4cd8fe06a7a48812f5d4e904c4ea7279c1f22f71863ac6a3764de75a4b8d26df' in p
+# RAM-aware, idempotent swap provisioning and disk/fstab safety.
+assert 'target_kb=$((2 * 1024 * 1024))' in p
+assert 'target_kb=$((1024 * 1024))' in p
+assert 'target_kb=$((512 * 1024))' in p
+assert 'swapon --show --noheadings --raw --output NAME' in p
+assert 'free_kb >= size_kb + reserve_kb' in p
+assert 'cp -a /etc/fstab "$fstab_backup"' in p
+assert 'sw,nofail 0 0' in p
+assert 'fallocate -l "${size_mib}M" "$path"' in p
+assert 'dd if=/dev/zero of="$path"' in p
+assert 'RAM is at least 4 GiB' in p
+assert 'ensure_swap\n    backup_existing' in p
+assert 'MemTotal|SwapTotal' in p
+
 print('Static checks passed. (No VM integration test performed.)')
 PY
