@@ -2,7 +2,7 @@
 
 **一条命令安装 BBRv3，自动识别系统版本与 CPU 架构，自动验证、安排安全试启动，并在首次启动成功后持久化。**
 
-> **v0.2.0：自动识别系统与架构。** 安装器读取 `/etc/os-release` 识别发行版和版本，并交叉核对 `uname -m` 与 `dpkg --print-architecture`，自动选择 x86_64/AMD64 或 ARM64/AArch64 对应的固定 Release 与 SHA256。识别/包映射范围为 **Debian 12+、Ubuntu 24.04+、x86_64、ARM64**。当前引导安装仍限定 **BIOS + GRUB + systemd**；UEFI、Secure Boot、LXC/Docker、RPM/APK 系统不支持。完整端到端安装目前仅有此前 AWS EC2 Debian 12 amd64 手工验证，Ubuntu、ARM64 和 Debian 13 仍需测试实例回归，不应直接用于生产。
+> **v0.2.1：自动识别系统/架构，并按 RAM 分档配置 Swap。** 安装器读取 `/etc/os-release` 识别发行版和版本，并交叉核对 `uname -m` 与 `dpkg --print-architecture`，自动选择 x86_64/AMD64 或 ARM64/AArch64 对应的固定 Release 与 SHA256。识别/包映射范围为 **Debian 12+、Ubuntu 24.04+、x86_64、ARM64**。当前引导安装仍限定 **BIOS + GRUB + systemd**；UEFI、Secure Boot、LXC/Docker、RPM/APK 系统不支持。完整端到端安装目前仅有此前 AWS EC2 Debian 12 amd64 手工验证，Ubuntu、ARM64 和 Debian 13 仍需测试实例回归，不应直接用于生产。
 
 本项目为独立的安装/验证编排程序，**不编译内核**；所使用的 BBRv3 内核由第三方项目 [byJoey/Actions-bbr-v3](https://github.com/byJoey/Actions-bbr-v3) 发布。安装的内核包包含第三方可执行内核代码及 DEB 维护脚本，请先评估上游供应链风险。
 
@@ -37,9 +37,10 @@ sudo systemctl status bbr3-finalize.service --no-pager
 ## 安装器做什么
 
 1. 自动检测发行版、版本、CPU 架构，并校验系统架构与 DEB 包架构一致；当前允许 Debian 12+ / Ubuntu 24.04+、x86_64 / ARM64。随后检测 BIOS + GRUB、systemd、当前内核回退镜像、可用磁盘、dpkg 和 IPv4 默认路由；拒绝 UEFI、容器及其他未经验证的启动组合。
-2. 内存不足约 768 MiB、且 Swap 少于约 512 MiB 时，自动创建 1 GiB 的持久化 `/swapfile-bbr3`（不改动已有 Swap）。
+2. 自动读取 `/proc/meminfo` 的 RAM 和当前已启用 Swap，按总 Swap 目标分档：RAM <1 GiB → 2 GiB；1–2 GiB → 1 GiB；2–4 GiB → 512 MiB；RAM ≥4 GiB 不主动改动 Swap。已有 Swap（包括 zram）计入总量，只补足差额，不关闭或调整现有 Swap。
 3. 备份 GRUB 配置和旧内核启动文件；**在安装内核包之前**设置旧内核为默认启动项。
 4. 从固定的第三方 Release 下载并校验 Image / Headers 的 **固定 SHA256**；验证包名、版本、内核配置及 AWS ENA 驱动。
+3. Swap 文件采用 `/swapfile-bbr3`（若已被占用则选择带序号的新路径），权限设为 `0600`，优先使用 `fallocate`，失败时回退到 `dd`；写入 `/etc/fstab` 的 `nofail` 持久化条目，并在失败时回滚新增条目。原始 fstab 会先备份。创建前检查剩余磁盘空间，必须额外保留 Swap 文件大小 + 3 GiB 安装空间 + 512 MiB 余量；空间不足时安全终止。
 5. 使用 `dpkg -i` 安装新内核并生成 initramfs；检查文件、dpkg 状态和 ENA 模块是否正确放入 initramfs。
 6. 写入 `99-bbrv3.conf`（`bbr` + `fq`）。旧内核运行时仅写文件，不提前切换旧内核的拥塞控制。
 7. 设置 GRUB `saved_entry=旧内核` 和 `next_entry=新内核`，安装 `bbr3-finalize.service`，随后自动重启（除非指定 `--no-reboot`）。
