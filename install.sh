@@ -190,7 +190,8 @@ protect_fallback_before_install() {
 }
 
 backup_existing() {
-    local dest="$BASE_DIR/backups/$(date +%Y%m%d-%H%M%S)"
+    local dest
+    dest="$BASE_DIR/backups/$(date +%Y%m%d-%H%M%S)"
     mkdir -p "$dest"
     cp -a /etc/default/grub /boot/grub/grub.cfg /boot/grub/grubenv "$dest/"
     cp -a "/boot/vmlinuz-$CURRENT_KERNEL" "/boot/initrd.img-$CURRENT_KERNEL" "$dest/"
@@ -256,7 +257,7 @@ UNIT
 
 extract_entry() {
     local pattern=$1
-    sed -nE "s/.*'($pattern[^']+)'.*/\\1/p" /boot/grub/grub.cfg | head -n 1
+    sed -nE "s/.*'(${pattern}[^']+)'.*/\\1/p" /boot/grub/grub.cfg | head -n 1
 }
 
 prepare_boot() {
