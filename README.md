@@ -1,8 +1,8 @@
 # BBR3-auto-install
 
-**一条命令安装 BBRv3，自动验证、安排安全试启动，并在首次启动成功后持久化。**
+**一条命令安装 BBRv3，自动识别系统版本与 CPU 架构，自动验证、安排安全试启动，并在首次启动成功后持久化。**
 
-> **v0.1.0（安全范围有限）**：当前仅支持 **Debian 12 Bookworm、amd64/x86_64、BIOS + GRUB + systemd**。主要参考已完成的 **AWS EC2 t3.nano / ENA / EBS NVMe** 手工验证。项目尚未在全新机器上完成端到端自动化回归测试，首个版本仍请优先用测试实例验证。**Ubuntu、Debian 13、ARM64、UEFI/Secure Boot、LXC/Docker 暂不支持**；不符合条件时安装器会终止，而不是猜测引导配置。
+> **v0.2.0：自动识别系统与架构。** 安装器读取 `/etc/os-release` 识别发行版和版本，并交叉核对 `uname -m` 与 `dpkg --print-architecture`，自动选择 x86_64/AMD64 或 ARM64/AArch64 对应的固定 Release 与 SHA256。识别/包映射范围为 **Debian 12+、Ubuntu 24.04+、x86_64、ARM64**。当前引导安装仍限定 **BIOS + GRUB + systemd**；UEFI、Secure Boot、LXC/Docker、RPM/APK 系统不支持。完整端到端安装目前仅有此前 AWS EC2 Debian 12 amd64 手工验证，Ubuntu、ARM64 和 Debian 13 仍需测试实例回归，不应直接用于生产。
 
 本项目为独立的安装/验证编排程序，**不编译内核**；所使用的 BBRv3 内核由第三方项目 [byJoey/Actions-bbr-v3](https://github.com/byJoey/Actions-bbr-v3) 发布。安装的内核包包含第三方可执行内核代码及 DEB 维护脚本，请先评估上游供应链风险。
 
@@ -36,7 +36,7 @@ sudo systemctl status bbr3-finalize.service --no-pager
 
 ## 安装器做什么
 
-1. 检测 Debian 12、amd64、BIOS GRUB、systemd、当前内核回退镜像、可用磁盘、dpkg 和 IPv4 默认路由；拒绝容器及未经验证的系统组合。
+1. 自动检测发行版、版本、CPU 架构，并校验系统架构与 DEB 包架构一致；当前允许 Debian 12+ / Ubuntu 24.04+、x86_64 / ARM64。随后检测 BIOS + GRUB、systemd、当前内核回退镜像、可用磁盘、dpkg 和 IPv4 默认路由；拒绝 UEFI、容器及其他未经验证的启动组合。
 2. 内存不足约 768 MiB、且 Swap 少于约 512 MiB 时，自动创建 1 GiB 的持久化 `/swapfile-bbr3`（不改动已有 Swap）。
 3. 备份 GRUB 配置和旧内核启动文件；**在安装内核包之前**设置旧内核为默认启动项。
 4. 从固定的第三方 Release 下载并校验 Image / Headers 的 **固定 SHA256**；验证包名、版本、内核配置及 AWS ENA 驱动。
@@ -47,18 +47,18 @@ sudo systemctl status bbr3-finalize.service --no-pager
 
 > **回退边界**：GRUB 一次性启动并不提供硬件级自动重启。如果新内核卡在启动阶段、无法联网或 systemd 没有启动，可能需要使用云控制台/Serial Console **手动触发一次重启**以回到旧内核；如果连 GRUB/磁盘也损坏，则使用预先创建的快照恢复。自检检查本机网络状态，不等价于外部端到端 SSH/性能验证。系统更新或其他 GRUB 工具以后仍可能修改默认菜单。
 
-## 固定上游版本（v0.1）
+## 固定上游版本（v0.2）
 
-| 项目 | 固定值 |
-|---|---|
-| 内核 | `7.3.4-joeyblog-bbrv3` |
-| GitHub Release | [`byJoey/Actions-bbr-v3` → `x86_64-7.3.4`](https://github.com/byJoey/Actions-bbr-v3/releases/tag/x86_64-7.3.4) |
-| Image SHA256 | `0791ee3782ce935a3f984d38484a0d74b9651184390cb4bf71cccf28a07f903f` |
-| Headers SHA256 | `603a9d1f2dfacac6caa9cfee5a0f938604e93cd217148a35132c151ea0bb69e7` |
-| qdisc | `fq` |
-| TCP 拥塞控制 | `bbr` |
+当前固定 Linux 7.3.4 标准 BBRv3，不自动追随最新 Release。根据运行时架构选择对应资产：
 
-固定版本而非自动选择最新 Release，是为了避免未经验证的内核升级意外改变启动行为。支持新版本需要更新 Pin、HASH 并完成测试。
+| 架构 | Release Tag | Image SHA256 | Headers SHA256 |
+|---|---|---|---|
+| x86_64 / AMD64 | [`x86_64-7.3.4`](https://github.com/byJoey/Actions-bbr-v3/releases/tag/x86_64-7.3.4) | `0791ee3782ce935a3f984d38484a0d74b9651184390cb4bf71cccf28a07f903f` | `603a9d1f2dfacac6caa9cfee5a0f938604e93cd217148a35132c151ea0bb69e7` |
+| ARM64 / AArch64 | [`arm64-7.3.4`](https://github.com/byJoey/Actions-bbr-v3/releases/tag/arm64-7.3.4) | `0ef3e4bc20726998b007a9574cead3854b9825948139bf54146e0ac4ef738317` | `4cd8fe06a7a48812f5d4e904c4ea7279c1f22f71863ac6a3764de75a4b8d26df` |
+
+两种架构共用内核 release version `7.3.4-joeyblog-bbrv3`，但下载包和 SHA256 不同。脚本在下载前根据 `uname -m` + `dpkg --print-architecture` 选择资产，包架构不匹配会终止。
+
+固定版本而非自动选择最新 Release，是为了避免未经验证的内核升级意外改变启动行为。支持新版本需要同时更新两种架构的 Pin、HASH 并完成测试。
 
 ## 排查与恢复
 
@@ -81,11 +81,11 @@ sudo grub-editenv list
 
 ## 后续路线
 
-下一阶段计划支持 Debian 13、Ubuntu 22.04/24.04、UEFI + Secure Boot（须解决签名问题）、ARM64，并加入云平台自动快照确认、VM 启动集成测试、发布签名和更完整的回滚策略。
+下一阶段重点是完成 Debian 13、Ubuntu 24.04+、ARM64 的真实虚拟机/云主机端到端测试，再评估 UEFI（Secure Boot 必须解决签名问题）、其他云平台启动驱动检测、自动快照确认、发布签名和更完整的回滚策略。
 
 ## 安全与责任
 
 - 仅用于你有管理权限的服务器。
 - 第三方内核包由上游维护，不是 Debian 官方内核；项目不对上游可执行代码作安全担保。
-- v0.1.0 不会安装或重写 GRUB 引导扇区，也不会卸载原内核；但会修改 GRUB 配置、sysctl 和 systemd 服务。
+- v0.2.0 不会安装或重写 GRUB 引导扇区，也不会卸载原内核；但会修改 GRUB 配置、sysctl 和 systemd 服务。
 - 自动重启会中断当前会话及业务，生产环境应安排维护窗口。
