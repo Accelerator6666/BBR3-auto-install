@@ -18,5 +18,13 @@ assert 'grub-reboot "$new_full"' in p
 assert 'grub-set-default "$NEW_ENTRY"' in finalizer
 assert '0791ee3782ce935a3f984d38484a0d74b9651184390cb4bf71cccf28a07f903f' in p
 assert '603a9d1f2dfacac6caa9cfee5a0f938604e93cd217148a35132c151ea0bb69e7' in p
+assert 'Debian 12+' in p and 'Ubuntu 24.04+' in p
+assert 'dpkg --compare-versions "$OS_VERSION_ID" ge 12' in p
+assert 'dpkg --compare-versions "$OS_VERSION_ID" ge 24.04' in p
+assert 'x86_64:amd64' in p
+assert 'aarch64:arm64' in p
+assert 'linux-image-${KREL}_${PKG_VERSION}_${DEB_ARCH}.deb' in p
+assert '0ef3e4bc20726998b007a9574cead3854b9825948139bf54146e0ac4ef738317' in p
+assert '4cd8fe06a7a48812f5d4e904c4ea7279c1f22f71863ac6a3764de75a4b8d26df' in p
 print('Static checks passed. (No VM integration test performed.)')
 PY
