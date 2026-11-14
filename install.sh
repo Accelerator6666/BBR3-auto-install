@@ -156,7 +156,7 @@ preflight() {
     if command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt --container --quiet; then
         die 'Containers cannot replace the host kernel'
     fi
-    for c in curl sha256sum dpkg dpkg-deb uname tar awk sed grep findmnt df swapon mkswap fallocate \
+    for c in curl sha256sum dpkg dpkg-deb uname tar awk sed grep findmnt df swapon mkswap \
              ip readlink grub-editenv grub-set-default grub-reboot grub-script-check \
              grub-probe update-grub lsinitramfs modinfo systemctl sysctl tee dd; do
         require_cmd "$c"
@@ -222,7 +222,7 @@ ensure_swap() {
     reserve_kb=$((3 * 1024 * 1024 + 512 * 1024))
     free_kb=$(df -Pk / | awk 'NR==2 {print $4}')
     (( free_kb >= size_kb + reserve_kb )) || \
-        die "Insufficient disk space for \${size_mib} MiB swap plus 3 GiB install reserve and 512 MiB headroom; free $((free_kb / 1024)) MiB."
+        die "Insufficient disk space for ${"$"}{size_mib} MiB swap plus 3 GiB install reserve and 512 MiB headroom; free $((free_kb / 1024)) MiB."
 
     # Never overwrite a pre-existing file. Reuse active BBR3 swapfiles in the
     # accounting above; if more swap is needed, select a new unused path.
@@ -250,9 +250,9 @@ ensure_swap() {
     fstab_backup="$BASE_DIR/fstab.before-swap.$(date +%Y%m%d-%H%M%S)"
     cp -a /etc/fstab "$fstab_backup"
 
-    log "Creating \${size_mib} MiB supplemental swapfile at $path."
+    log "Creating ${"$"}{size_mib} MiB supplemental swapfile at $path."
     if command -v fallocate >/dev/null 2>&1; then
-        if ! fallocate -l "\${size_mib}M" "$path"; then
+        if ! fallocate -l "${"$"}{size_mib}M" "$path"; then
             rm -f "$path"
         fi
     fi
@@ -270,6 +270,7 @@ ensure_swap() {
 
     if ! awk -v p="$path" '$1 == p {found=1} END {exit !found}' /etc/fstab; then
         if ! printf '%s\n' "$path none swap sw,nofail 0 0" >> /etc/fstab; then
+            cp -a "$fstab_backup" /etc/fstab
             rm -f "$path"
             die "Unable to persist swap entry in /etc/fstab."
         fi
@@ -278,7 +279,7 @@ ensure_swap() {
 
     if ! swapon "$path"; then
         if (( fstab_added )); then
-            sed -i "\|^[[:space:]]*$path[[:space:]]|d" /etc/fstab
+            cp -a "$fstab_backup" /etc/fstab
         fi
         rm -f "$path"
         die "swapon failed for $path; swapfile and newly-added fstab entry were rolled back. Check filesystem swapfile support."
