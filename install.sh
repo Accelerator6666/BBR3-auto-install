@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# BBR3-auto-install v0.2.0 — auto-detect Debian/Ubuntu release and x86_64/ARM64.
+# BBR3-auto-install v0.2.1 — auto-detect OS/CPU and provision RAM-tiered swap.
 # Pinned third-party kernel: byJoey/Actions-bbr-v3 x86_64-7.3.4.
 set -Eeuo pipefail
 umask 077
 
-readonly INSTALLER_VERSION=0.2.0
+readonly INSTALLER_VERSION=0.2.1
 readonly KERNEL_VERSION=7.3.4
 readonly KREL="${KERNEL_VERSION}-joeyblog-bbrv3"
 readonly PKG_VERSION=7.3.4-g7595a62d45ee-1
@@ -82,6 +82,7 @@ status() {
     fi
     printf 'Machine architecture: %s\n' "$(uname -m)"
     if command -v dpkg >/dev/null 2>&1; then printf 'Package architecture: %s\n' "$(dpkg --print-architecture)"; fi
+    awk '/^(MemTotal|SwapTotal):/ {printf "%s: %.0f MiB\n", $1, $2 / 1024}' /proc/meminfo
     echo "Kernel: $(uname -r)"
     sysctl net.ipv4.tcp_congestion_control net.core.default_qdisc 2>/dev/null || true
     if command -v grub-editenv >/dev/null 2>&1; then grub-editenv list 2>/dev/null || true; fi
@@ -157,7 +158,7 @@ preflight() {
     fi
     for c in curl sha256sum dpkg dpkg-deb uname tar awk sed grep findmnt df swapon mkswap fallocate \
              ip readlink grub-editenv grub-set-default grub-reboot grub-script-check \
-             grub-probe update-grub lsinitramfs modinfo systemctl sysctl tee; do
+             grub-probe update-grub lsinitramfs modinfo systemctl sysctl tee dd; do
         require_cmd "$c"
     done
     [[ -s /boot/grub/grub.cfg && -f /etc/default/grub ]] || die 'GRUB boot configuration not found'
@@ -184,19 +185,110 @@ preflight() {
 }
 
 ensure_swap() {
-    local mem_kb swap_kb path
+    local mem_kb swap_kb target_kb size_kb size_mib free_kb reserve_kb
+    local path candidate index fstab_added=0 fstab_backup
+
     mem_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
     swap_kb=$(awk '/^SwapTotal:/ {print $2}' /proc/meminfo)
-    if (( mem_kb >= 786432 || swap_kb >= 524288 )); then return; fi
-    path=/swapfile-bbr3
-    [[ ! -e "$path" ]] || die "$path exists but usable swap was not detected: inspect it manually"
-    log 'Low-memory VPS detected: creating a persistent 1 GiB swapfile.'
-    fallocate -l 1G "$path"
+
+    # Target TOTAL active swap, not an unconditional additional file.
+    # <1 GiB RAM: 2 GiB total swap; 1-2 GiB: 1 GiB; 2-4 GiB: 512 MiB.
+    # >=4 GiB RAM: leave the host's existing swap policy unchanged.
+    if (( mem_kb < 1048576 )); then
+        target_kb=$((2 * 1024 * 1024))
+    elif (( mem_kb < 2097152 )); then
+        target_kb=$((1024 * 1024))
+    elif (( mem_kb < 4194304 )); then
+        target_kb=$((512 * 1024))
+    else
+        target_kb=0
+    fi
+
+    log "Memory detected: $((mem_kb / 1024)) MiB RAM; $((swap_kb / 1024)) MiB active swap."
+    if (( target_kb == 0 )); then
+        log 'RAM is at least 4 GiB; automatic swap changes are not required.'
+        return 0
+    fi
+    if (( swap_kb >= target_kb )); then
+        log "Existing active swap meets the target ($((target_kb / 1024)) MiB); no changes."
+        return 0
+    fi
+
+    # Round up to whole MiB. Preserve a 3 GiB package/install reserve plus
+    # 512 MiB headroom so a swapfile cannot consume the space needed by dpkg.
+    size_kb=$((target_kb - swap_kb))
+    size_mib=$(((size_kb + 1023) / 1024))
+    size_kb=$((size_mib * 1024))
+    reserve_kb=$((3 * 1024 * 1024 + 512 * 1024))
+    free_kb=$(df -Pk / | awk 'NR==2 {print $4}')
+    (( free_kb >= size_kb + reserve_kb )) || \
+        die "Insufficient disk space for \${size_mib} MiB swap plus 3 GiB install reserve and 512 MiB headroom; free $((free_kb / 1024)) MiB."
+
+    # Never overwrite a pre-existing file. Reuse active BBR3 swapfiles in the
+    # accounting above; if more swap is needed, select a new unused path.
+    index=0
+    path=''
+    while (( index < 10 )); do
+        if (( index == 0 )); then
+            candidate=/swapfile-bbr3
+        else
+            candidate="/swapfile-bbr3-$index"
+        fi
+        if [[ -e "$candidate" ]]; then
+            if swapon --show --noheadings --raw --output NAME | grep -Fxq "$candidate"; then
+                index=$((index + 1))
+                continue
+            fi
+            die "Swap candidate already exists but is not active; refusing to overwrite: $candidate"
+        fi
+        path=$candidate
+        break
+    done
+    [[ -n "$path" ]] || die 'No unused BBR3 swapfile path available.'
+
+    mkdir -p "$BASE_DIR"
+    fstab_backup="$BASE_DIR/fstab.before-swap.$(date +%Y%m%d-%H%M%S)"
+    cp -a /etc/fstab "$fstab_backup"
+
+    log "Creating \${size_mib} MiB supplemental swapfile at $path."
+    if command -v fallocate >/dev/null 2>&1; then
+        if ! fallocate -l "\${size_mib}M" "$path"; then
+            rm -f "$path"
+        fi
+    fi
+    if [[ ! -e "$path" ]]; then
+        if ! dd if=/dev/zero of="$path" bs=1M count="$size_mib" conv=fsync status=none; then
+            rm -f "$path"
+            die "Unable to allocate swapfile on the root filesystem."
+        fi
+    fi
     chmod 600 "$path"
-    mkswap "$path" >/dev/null
-    swapon "$path"
-    grep -Eq '^[[:space:]]*/swapfile-bbr3[[:space:]]' /etc/fstab || \
-        printf '%s\n' '/swapfile-bbr3 none swap sw,nofail 0 0' >> /etc/fstab
+    if ! mkswap "$path" >/dev/null; then
+        rm -f "$path"
+        die "mkswap failed for $path; swapfile removed."
+    fi
+
+    if ! awk -v p="$path" '$1 == p {found=1} END {exit !found}' /etc/fstab; then
+        if ! printf '%s\n' "$path none swap sw,nofail 0 0" >> /etc/fstab; then
+            rm -f "$path"
+            die "Unable to persist swap entry in /etc/fstab."
+        fi
+        fstab_added=1
+    fi
+
+    if ! swapon "$path"; then
+        if (( fstab_added )); then
+            sed -i "\|^[[:space:]]*$path[[:space:]]|d" /etc/fstab
+        fi
+        rm -f "$path"
+        die "swapon failed for $path; swapfile and newly-added fstab entry were rolled back. Check filesystem swapfile support."
+    fi
+
+    swap_kb=$(awk '/^SwapTotal:/ {print $2}' /proc/meminfo)
+    (( swap_kb >= target_kb )) || \
+        die "Swap activated, but total active swap is below the expected target; inspect swapon --show."
+    log "Persistent swap configured: $path; active swap is now $((swap_kb / 1024)) MiB (target $((target_kb / 1024)) MiB)."
+    log "Original /etc/fstab backed up to $fstab_backup."
 }
 
 fetch_verified() {
