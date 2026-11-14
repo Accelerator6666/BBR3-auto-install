@@ -222,7 +222,7 @@ ensure_swap() {
     reserve_kb=$((3 * 1024 * 1024 + 512 * 1024))
     free_kb=$(df -Pk / | awk 'NR==2 {print $4}')
     (( free_kb >= size_kb + reserve_kb )) || \
-        die "Insufficient disk space for ${"$"}{size_mib} MiB swap plus 3 GiB install reserve and 512 MiB headroom; free $((free_kb / 1024)) MiB."
+        die "Insufficient disk space for ${size_mib} MiB swap plus 3 GiB install reserve and 512 MiB headroom; free $((free_kb / 1024)) MiB."
 
     # Never overwrite a pre-existing file. Reuse active BBR3 swapfiles in the
     # accounting above; if more swap is needed, select a new unused path.
@@ -250,9 +250,9 @@ ensure_swap() {
     fstab_backup="$BASE_DIR/fstab.before-swap.$(date +%Y%m%d-%H%M%S)"
     cp -a /etc/fstab "$fstab_backup"
 
-    log "Creating ${"$"}{size_mib} MiB supplemental swapfile at $path."
+    log "Creating ${size_mib} MiB supplemental swapfile at $path."
     if command -v fallocate >/dev/null 2>&1; then
-        if ! fallocate -l "${"$"}{size_mib}M" "$path"; then
+        if ! fallocate -l "${size_mib}M" "$path"; then
             rm -f "$path"
         fi
     fi
