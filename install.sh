@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 umask 077
 
-readonly VERSION=0.2.0
+readonly INSTALLER_VERSION=0.2.0
 readonly KERNEL_VERSION=7.3.4
 readonly KREL="${KERNEL_VERSION}-joeyblog-bbrv3"
 readonly PKG_VERSION=7.3.4-g7595a62d45ee-1
@@ -40,7 +40,7 @@ NEED_ENA=0
 
 usage() {
     cat <<EOF
-BBR3-auto-install ${VERSION}
+BBR3-auto-install ${INSTALLER_VERSION}
 Usage: sudo bash install.sh [--yes] [--backup-confirmed] [--no-reboot] [--status]
 
   --yes                Non-interactive installation
@@ -398,7 +398,7 @@ main() {
     touch "$LOG_FILE"
     chmod 600 "$LOG_FILE"
     exec > >(tee -a "$LOG_FILE") 2>&1
-    log "Starting installer $VERSION on $(uname -r) for $OS_PRETTY_NAME / $MACHINE_ARCH"
+    log "Starting installer $INSTALLER_VERSION on $(uname -r) for $OS_PRETTY_NAME / $MACHINE_ARCH"
 
     if [[ "$(uname -r)" == "$KREL" ]]; then
         log 'Target kernel already running; checking configuration without reinstalling.'
