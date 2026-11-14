@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# BBR3-auto-install v0.1.0 — Debian 12/amd64 BIOS+GRUB safe installer.
+# BBR3-auto-install v0.2.0 — auto-detect Debian/Ubuntu release and x86_64/ARM64.
 # Pinned third-party kernel: byJoey/Actions-bbr-v3 x86_64-7.3.4.
 set -Eeuo pipefail
 umask 077
